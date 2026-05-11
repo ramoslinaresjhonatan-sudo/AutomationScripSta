@@ -4,7 +4,7 @@ import time
 import os
 import base64
 import mimetypes
-
+from Src.Utilities.logger import setup_logger
 
 class WhatsApp:
 
@@ -13,6 +13,7 @@ class WhatsApp:
         self._browser = None
         self._context = None
         self._page = None
+        self.logger = setup_logger("Integracion", "WhatsApp")
 
     async def conectar(self):
         if await self._pagina_activa():
@@ -21,18 +22,18 @@ class WhatsApp:
         await self._limpiar_recursos()
 
         try:
-            print("Intentando conectar con el navegador (CDP: 9222)...")
+            self.logger.info("Intentando conectar con el navegador (CDP: 9222)...")
             self._playwright = await async_playwright().start()
             
             try:
                 self._browser = await self._playwright.chromium.connect_over_cdp("http://localhost:9222")
             except Exception as e:
-                print(f"Error: No se pudo conectar al puerto 9222. ¿Está el navegador abierto? {e}")
+                self.logger.error(f"No se pudo conectar al puerto 9222. ¿Está el navegador abierto? {e}")
                 await self.cerrar()
                 return False
 
             if not self._browser.contexts:
-                print("Error: El navegador no tiene contextos activos.")
+                self.logger.error("El navegador no tiene contextos activos.")
                 await self.cerrar()
                 return False
 
@@ -51,7 +52,7 @@ class WhatsApp:
             return await self._validar_whatsapp()
 
         except Exception as e:
-            print(f"Error fatal en conexión WhatsApp: {e}")
+            self.logger.error(f"Error fatal en conexión WhatsApp: {e}")
             await self.cerrar()
             return False
 
@@ -77,7 +78,7 @@ class WhatsApp:
             if self._playwright:
                 await self._playwright.stop()
         except Exception as e:
-            print(f"Aviso al cerrar: {e}")
+            self.logger.warning(f"Aviso al cerrar: {e}")
         finally:
             self._playwright = None
             self._browser = None
@@ -99,7 +100,7 @@ class WhatsApp:
             await self.page.wait_for_selector('div#side', timeout=60000)
             return True
         except:
-            print("No se pudo abrir WhatsApp")
+            self.logger.error("No se pudo abrir WhatsApp")
             return False
 
     async def _buscar_chat(self, nombre):
@@ -161,7 +162,7 @@ class WhatsApp:
             await contact.wait_for(state="visible", timeout=7000)
             await contact.click()
         except:
-            print(f"Aviso: No se encontró contacto visualmente con título '{nombre}', intentando Enter.")
+            self.logger.warning(f"No se encontró contacto visualmente con título '{nombre}', intentando Enter.")
             await page.keyboard.press('Enter')
 
         await page.wait_for_timeout(1500)
@@ -177,13 +178,13 @@ class WhatsApp:
             titulo_actual = await titulo_elemento.text_content()
             
             if titulo_actual and nombre.lower() in titulo_actual.lower():
-                print(f"   [✓] Confirmado: Chat '{titulo_actual}' correctamente abierto.")
+                self.logger.info(f"Confirmado: Chat '{titulo_actual}' correctamente abierto.")
                 return True
             else:
-                print(f"   [!] ADVERTENCIA: El chat abierto es '{titulo_actual}', pero se buscaba '{nombre}'.")
+                self.logger.warning(f"El chat abierto es '{titulo_actual}', pero se buscaba '{nombre}'.")
                 return False
         except Exception as e:
-            print(f"   [!] Advertencia: No se pudo confirmar visualmente el nombre del chat: {e}")
+            self.logger.warning(f"No se pudo confirmar visualmente el nombre del chat: {e}")
             return False
 
     async def _input_chat(self):
@@ -231,12 +232,12 @@ class WhatsApp:
         try:
             subprocess.run(cmd, creationflags=0x08000000)
         except Exception as e:
-            print(f"Error copiando al portapapeles: {e}")
+            self.logger.error(f"Error copiando al portapapeles: {e}")
 
     async def _enviar_archivos(self, rutas, mensaje=None):
         rutas_validas = [r for r in rutas if os.path.exists(r)]
         if not rutas_validas:
-            print("Aviso: Ninguna ruta de archivo es válida.")
+            self.logger.warning("Aviso: Ninguna ruta de archivo es válida.")
             return
 
         page = self._page
@@ -300,9 +301,9 @@ class WhatsApp:
 
         except Exception as e:
             import traceback
-            print(f"================ ERROR EN WHATSAPP ================")
-            print(f"Error: {str(e)}")
-            traceback.print_exc()
+            self.logger.critical(f"================ ERROR EN WHATSAPP ================")
+            self.logger.critical(f"Error: {str(e)}")
+            self.logger.critical(traceback.format_exc())
             return False
 
     async def mensaje(self, chat, texto):

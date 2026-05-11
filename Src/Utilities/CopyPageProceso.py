@@ -4,10 +4,12 @@ import time
 import json
 import shutil
 import threading
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from Src.Integrations.WhatsApp import WhatsApp
+from Src.Utilities.logger import setup_logger
 
 def resource_path(filename):
     if hasattr(sys, "_MEIPASS"):
@@ -26,6 +28,7 @@ def formato_bytes(bytes_):
 
 
 def enviar_correo_error(archivo_error, smtp_service, asunto):
+    logger = logging.getLogger("Tareas.CopyPageProceso")
     try:
         mensaje = (
             "Estimados,\n\n"
@@ -40,10 +43,10 @@ def enviar_correo_error(archivo_error, smtp_service, asunto):
             attachments=archivo_error
         )
 
-        print(f"[INFO] Correo enviado a {smtp_service.error_recipients}")
+        logger.info(f"Correo enviado a {smtp_service.error_recipients}")
 
     except Exception as e:
-        print(f"[ERROR] Fallo al enviar correo: {e}")
+        logger.error(f"Fallo al enviar correo: {e}")
 
 
 def construir_mensaje_resumen(tareas_ok, tareas_error):
@@ -62,8 +65,11 @@ def construir_mensaje_resumen(tareas_ok, tareas_error):
 
     all_tareas = tareas_ok + tareas_error
     for i, t in enumerate(all_tareas, 1):
-        status = "[EXITO ]" if t in tareas_ok else "[ERROR]"
-        mensaje += f"{i}. {status}: {t['nombre']}\n"
+        if t in tareas_ok:
+            mensaje += f"{i}. [EXITO ]: {t['nombre']}\n"
+        else:
+            num_errores = t.get("num_errores", 0)
+            mensaje += f"{i}. [ERROR ]: {t['nombre']} ({num_errores} errores)\n"
     
     mensaje += "---------------------------------------\n"
     mensaje += "*Detalle De Incremento*\n"
@@ -122,7 +128,7 @@ async def enviar_whatsapp_resumen_tareas(tareas_exitosas, tareas_con_errores, wa
 
         sender = WhatsApp()
         if not await sender.conectar():
-            print("[ERROR] No se pudo conectar a WhatsApp para enviar el resumen.")
+            logging.getLogger("Tareas.CopyPageProceso").error("No se pudo conectar a WhatsApp para enviar el resumen.")
             return
 
         mensaje = construir_mensaje_resumen(tareas_exitosas, tareas_con_errores) if enviar_con_texto else None
@@ -134,33 +140,24 @@ async def enviar_whatsapp_resumen_tareas(tareas_exitosas, tareas_con_errores, wa
             ruta_mensaje = os.path.join(mensajes_dir, f"Resumen-copypage.txt")
             with open(ruta_mensaje, "w", encoding="utf-8") as f:
                 f.write(mensaje)
-            print(f"[INFO] Mensaje guardado en: {ruta_mensaje}")
 
         for chat in chats:
-            print(f"[INFO] Enviando reporte a {chat}")
             await sender.enviar(chat, mensaje=mensaje, archivos=archivos_envio)
         
         await sender.cerrar()
 
     except Exception as e:
-        print(f"[ERROR] Fallo al enviar mensaje de WhatsApp: {e}")
+        logging.getLogger("Tareas.CopyPageProceso").error(f"Fallo al enviar mensaje de WhatsApp: {e}")
+
 
 def crear_rutas_logs(nombre):
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    logs = os.path.join(project_root, "Logs")
     storage = os.path.join(project_root, "Storage")
-    mensajes = os.path.join(project_root, "Mensajes")
-    os.makedirs(logs, exist_ok=True)
     os.makedirs(storage, exist_ok=True)
-    os.makedirs(mensajes, exist_ok=True)
-    fecha = datetime.now().strftime('%d-%m-%Y')
-    log = os.path.join(logs, f"CopyPage-{fecha}-{nombre}.log")
+    
     err = os.path.join(storage, f"ListaArchivoErrores-{nombre}.txt")
-    return log, err
+    return err
 
-def registrar(f_log, mensaje):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    f_log.write(f"[{ts}] {mensaje}\n")
 
 def validar_archivo(archivo, solo_qvd, dias, fecha_actual):
     if not archivo.is_file():
@@ -176,22 +173,6 @@ def validar_archivo(archivo, solo_qvd, dias, fecha_actual):
     return True
 
 
-def copiar_archivo(origen, destino, libre_actual):
-    tam_origen = origen.stat().st_size
-    tam_dest = os.path.getsize(destino) if os.path.exists(destino) else 0
-
-    if os.path.exists(destino) and tam_origen == tam_dest:
-        return "omitido", 0
-
-    diff = max(tam_origen - tam_dest, 0)
-
-    if libre_actual < diff:
-        return "sin_espacio", diff
-
-    shutil.copy2(str(origen), str(destino))
-    return "copiado", diff
-
-
 def copiar_archivos_modificados(nombre, origen, destino, dias_para_considerar=None, solo_qvd=False):
     try:
         inicio = time.time()
@@ -201,7 +182,8 @@ def copiar_archivos_modificados(nombre, origen, destino, dias_para_considerar=No
 
         os.makedirs(destino, exist_ok=True)
 
-        log_path, err_path = crear_rutas_logs(nombre)
+        err_path = crear_rutas_logs(nombre)
+        logger = setup_logger("CopyPage", nombre)
         
         total_bytes_copiados = 0
         copiados, omitidos = 0, 0
@@ -274,61 +256,26 @@ def copiar_archivos_modificados(nombre, origen, destino, dias_para_considerar=No
                     todos_los_errores.append(str(archivo))
                 return f"ERROR {archivo} {e}"
 
-        print(f"[INFO] Escaneando archivos en {origen}...")
+        logger.info(f"Escaneando archivos en {origen}...")
         archivos_a_procesar = list(Path(origen).rglob("*"))
+        logger.info(f"Iniciando escaneo de {len(archivos_a_procesar)} elementos")
         
-        with open(log_path, "w", encoding="utf-8") as log:
-            registrar(log, f"Iniciando escaneo de {len(archivos_a_procesar)} elementos")
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            resultados = list(executor.map(proceso_archivo, archivos_a_procesar))
             
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                resultados = list(executor.map(proceso_archivo, archivos_a_procesar))
-                
-                for res in resultados:
-                    if res:
-                        registrar(log, res)
+            for res in resultados:
+                if res:
+                    logger.info(res)
 
-            if errores:
-                with open(err_path, "w", encoding="utf-8") as f_err:
-                    json.dump(todos_los_errores, f_err, indent=4)
+        if errores:
+            with open(err_path, "w", encoding="utf-8") as f_err:
+                json.dump(todos_los_errores, f_err, indent=4)
 
-        print(f"[INFO] Tarea '{nombre}' finalizada: {copiados} copiados, {omitidos} omitidos, {len(todos_los_errores)} errores.")
-        print(f"[INFO] Tiempo invertido: {time.time() - inicio:.2f}s")
+        logger.info(f"Tarea '{nombre}' finalizada: {copiados} copiados, {omitidos} omitidos, {len(todos_los_errores)} errores.")
+        logger.info(f"Tiempo invertido: {time.time() - inicio:.2f}s")
 
         return err_path, bool(errores), total_bytes_copiados
 
     except Exception as e:
-        print(f"[ERROR] Fallo general en la copia de archivos: {e}")
+        logging.getLogger("CopyPage").error(f"Fallo general en la copia de archivos: {e}")
         return None, False, 0
-
-def calcular_espacio_necesario(origen, destino, dias=None, solo_qvd=False):
-    try:
-        total = 0
-        nuevos = 0
-        modificados = 0
-        fecha_actual = datetime.now()
-        
-        for archivo in Path(origen).rglob("*"):
-            if not validar_archivo(archivo, solo_qvd, dias, fecha_actual):
-                continue
-
-            destino_ruta = os.path.join(destino, os.path.relpath(archivo, origen))
-            size = archivo.stat().st_size
-
-            if os.path.exists(destino_ruta):
-                size_dest = os.path.getsize(destino_ruta)
-                if size != size_dest:
-                    total += max(size - size_dest, 0)
-                    modificados += 1
-            else:
-                total += size
-                nuevos += 1
-
-        return {
-            "bytes": total,
-            "nuevos": nuevos,
-            "modificados": modificados
-        }
-
-    except Exception as e:
-        print(f"[ERROR] Fallo al calcular espacio necesario: {e}")
-        return None
