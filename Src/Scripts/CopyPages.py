@@ -9,6 +9,7 @@ if root_dir not in sys.path:
 
 import Src.Utilities.CopyPageProceso as CopyPageProceso
 from Src.Integrations.Correo import Correo
+from Src.Utilities.logger import setup_logger
 
 config_path = os.path.join(root_dir, "Config", "copypage.json")
 correo_config_path = os.path.join(root_dir, "Config", "Correo.json")
@@ -25,7 +26,7 @@ correo_service = Correo(
     server=correo_cfg.get("server"),
     port=correo_cfg.get("port"),
     email_address=correo_cfg.get("email_address"),
-    display_name=correo_cfg.get("display_name"),
+    display_name=correo_cfg.get("email_address"),
     error_recipients=";".join(config.get("logsTareas", []))
 )
 
@@ -33,6 +34,9 @@ whatsapp_cfg = config.get("whatsapp", {})
 asunto_correo = config.get("asuntoCorreo", "Resultado del proceso de copia")
 
 async def main():
+    logger = setup_logger("Tareas", "CopyPages")
+    logger.info("Iniciando proceso de copia de páginas...")
+    
     tareas_exitosas = []
     tareas_con_errores = []
 
@@ -53,14 +57,15 @@ async def main():
 
         if error_log_path:
             if tiene_errores:
-                 print(f"\n[INFO] Enviando reporte de errores para tarea '{nombre}'...")
+                 logger.error(f"Enviando reporte de errores para tarea '{nombre}'...")
                  CopyPageProceso.enviar_correo_error(error_log_path, correo_service, asunto_correo)
             
             tarea_info = {
                 "nombre": nombre,
                 "bytes_copiados": bytes_copiados,
                 "destino": destino,
-                "log_path": error_log_path if tiene_errores else None
+                "log_path": error_log_path if tiene_errores else None,
+                "num_errores": len(todos_los_errores) if todos_los_errores else 0
             }
             
             if tiene_errores:
@@ -69,10 +74,10 @@ async def main():
                  tareas_exitosas.append(tarea_info)
 
     if tareas_exitosas or tareas_con_errores:
-        print("\n[INFO] Enviando resumen agrupado por WhatsApp...")
+        logger.info("Enviando resumen agrupado por WhatsApp...")
         await CopyPageProceso.enviar_whatsapp_resumen_tareas(tareas_exitosas, tareas_con_errores, whatsapp_cfg)
 
-    print("\n[INFO] Proceso completado")
+    logger.info("Proceso completado")
 
 if __name__ == "__main__":
     asyncio.run(main())
